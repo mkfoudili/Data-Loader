@@ -1,0 +1,61 @@
+{
+  "config": {
+    "patient_ids": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "batch_sizes": [
+      16,
+      32,
+      64,
+      128
+    ],
+    "n_runs": 1,
+    "npy_dir": "..\\Data-Wrangling\\etl_output\\npy"
+  },
+  "results": [
+    {
+      "batch_size": 16,
+      "db_epoch_s": 214.178,
+      "npy_epoch_s": 2.479,
+      "db_ms_per_batch": 79.33,
+      "npy_ms_per_batch": 0.92,
+      "db_samples_per_s": 202.0,
+      "npy_samples_per_s": 17428.0,
+      "speedup_npy_over_db": 86.4
+    },
+    {
+      "batch_size": 32,
+      "db_epoch_s": 203.569,
+      "npy_epoch_s": 1.592,
+      "db_ms_per_batch": 150.81,
+      "npy_ms_per_batch": 1.18,
+      "db_samples_per_s": 212.0,
+      "npy_samples_per_s": 27132.0,
+      "speedup_npy_over_db": 127.87
+    },
+    {
+      "batch_size": 64,
+      "db_epoch_s": 199.321,
+      "npy_epoch_s": 1.582,
+      "db_ms_per_batch": 295.32,
+      "npy_ms_per_batch": 2.34,
+      "db_samples_per_s": 217.0,
+      "npy_samples_per_s": 27306.0,
+      "speedup_npy_over_db": 125.99
+    },
+    {
+      "batch_size": 128,
+      "db_epoch_s": 210.685,
+      "npy_epoch_s": 1.995,
+      "db_ms_per_batch": 624.32,
+      "npy_ms_per_batch": 5.91,
+      "db_samples_per_s": 205.0,
+      "npy_samples_per_s": 21652.0,
+      "speedup_npy_over_db": 105.61
+    }
+  ]
+}

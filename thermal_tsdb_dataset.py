@@ -274,7 +274,7 @@ class ThermalTSDBDataset(Dataset):
         label_tensor  : int64   scalaire (0 = normal, 1 = anomalie)
         """
         row = self._metadata.iloc[idx]
-        signal = self._fetch_window(
+        signal, _ = self._fetch_window(
             patient_id   = int(row["patient_id"]),
             window_start = row["window_start"],
             window_end   = row["window_end"],
@@ -294,18 +294,18 @@ class ThermalTSDBDataset(Dataset):
         patient_id: int,
         window_start: pd.Timestamp,
         window_end: pd.Timestamp,
-    ) -> np.ndarray:
+    ) -> Tuple[np.ndarray, List[pd.Timestamp]]:
         """
         Requête sur la hypertable thermal_readings.
 
         Utilise les index idx_tr_patient_ts (patient_id, timestamp DESC)
         créés en Sprint 2 pour une latence minimale.
 
-        Retourne un ndarray float32 de forme (C, T).
+        Retourne (signal, timestamps) où signal est (C, T) et timestamps est une liste de T timestamps.
         """
         col_select = ", ".join(self.channels)
         query = f"""
-            SELECT {col_select}
+            SELECT timestamp, {col_select}
             FROM thermal_readings
             WHERE patient_id = %s
               AND timestamp >= %s
@@ -326,19 +326,29 @@ class ThermalTSDBDataset(Dataset):
                 f"Fenêtre vide pour patient={patient_id} "
                 f"[{window_start} → {window_end}] — zéros retournés"
             )
-            return np.zeros((len(self.channels), self.window_size), dtype=np.float32)
+            return (
+                np.zeros((len(self.channels), self.window_size), dtype=np.float32),
+                [window_start + pd.Timedelta(seconds=i) for i in range(self.window_size)]
+            )
 
-        arr = np.array(rows, dtype=np.float32)   # (T, C)
+        # Extraction des timestamps et du signal
+        timestamps = [r[0] for r in rows]
+        arr = np.array([r[1:] for r in rows], dtype=np.float32)   # (T, C)
 
         # Ajustement de la longueur à window_size exact
         T = arr.shape[0]
         if T < self.window_size:
             pad = np.zeros((self.window_size - T, len(self.channels)), dtype=np.float32)
             arr = np.vstack([arr, pad])
+            # Pad timestamps too
+            last_ts = timestamps[-1] if timestamps else window_start
+            for i in range(1, self.window_size - T + 1):
+                timestamps.append(last_ts + pd.Timedelta(seconds=i))
         elif T > self.window_size:
             arr = arr[: self.window_size]
+            timestamps = timestamps[: self.window_size]
 
-        return arr.T  # (C, T)
+        return arr.T, timestamps  # (C, T), list[T]
 
     # ------------------------------------------------------------------
     # Méthode utilitaire : récupérer une fenêtre avec ses métadonnées
@@ -346,17 +356,24 @@ class ThermalTSDBDataset(Dataset):
 
     def get_sample_with_meta(self, idx: int) -> dict:
         """Retourne le signal + les métadonnées complètes pour inspection."""
-        signal, label = self[idx]
-        meta = self._metadata.iloc[idx].to_dict()
+        row = self._metadata.iloc[idx]
+        signal, timestamps = self._fetch_window(
+            patient_id   = int(row["patient_id"]),
+            window_start = row["window_start"],
+            window_end   = row["window_end"],
+        )
+        label = int(row["label"])
+
         return {
-            "signal":       signal,
+            "signal":       torch.from_numpy(signal),
             "label":        label,
-            "patient_id":   meta["patient_id"],
-            "window_id":    meta["window_id"],
-            "window_start": meta["window_start"],
-            "window_end":   meta["window_end"],
-            "anomaly_ratio": meta["anomaly_ratio"],
-            "is_interpolated": meta["is_interpolated"],
+            "patient_id":   int(row["patient_id"]),
+            "window_id":    int(row["window_id"]),
+            "timestamps":   timestamps,
+            "window_start": row["window_start"],
+            "window_end":   row["window_end"],
+            "anomaly_ratio": row["anomaly_ratio"],
+            "is_interpolated": row["is_interpolated"],
         }
 
     # ------------------------------------------------------------------
