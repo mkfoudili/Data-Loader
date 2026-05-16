@@ -1,0 +1,17 @@
+# Sprint 3 – Database-to-Model Pipeline
+# Topic M6 : Synthetic Thermal Time-Series
+# Team SG03
+
+# Database
+psycopg2-binary>=2.9.9
+
+# Data & Scientific
+numpy>=1.26.0
+pandas>=2.1.0
+
+# Deep Learning
+torch>=2.2.0         # CPU ou CUDA selon la machine
+
+# Utilities
+python-dotenv>=1.0.0
+tqdm>=4.66.0
