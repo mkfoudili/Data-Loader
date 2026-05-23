@@ -76,7 +76,7 @@ def train_model(
     val_loader:    DataLoader,
     n_channels:    int   = 3,
     window_size:   int   = 60,
-    max_epochs:    int   = 1000,
+    max_epochs:    int   = 5,
     learning_rate: float = 0.001,
     weight_decay:  float = 0.0001,
     patience:      int   = 50,
@@ -103,7 +103,7 @@ def train_model(
         model.parameters(), lr=learning_rate, weight_decay=weight_decay
     )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=lr_factor, patience=lr_patience, verbose=False
+        optimizer, mode="min", factor=lr_factor, patience=lr_patience
     )
 
     log.info(
@@ -356,7 +356,7 @@ def run_ablation(
     test_loader:  DataLoader,
     n_channels:   int = 3,
     window_size:  int = 60,
-    max_epochs:   int = 1000,
+    max_epochs:   int = 5,
     device: Optional[torch.device] = None,
 ):
     """Run all 4 loss variants and save Table IV as CSV."""
@@ -441,10 +441,10 @@ def run_ablation(
 
 def main():
     parser = argparse.ArgumentParser(description="Sprint 3 – TAAE Training")
-    parser.add_argument("--epochs",     type=int,   default=1000)
-    parser.add_argument("--batch-size", type=int,   default=80)
+    parser.add_argument("--epochs",     type=int,   default=100)
+    parser.add_argument("--batch-size", type=int,   default=256)
     parser.add_argument("--lr",         type=float, default=0.001)
-    parser.add_argument("--patience",   type=int,   default=50)
+    parser.add_argument("--patience",   type=int,   default=5)
     parser.add_argument("--loss",       type=str,   default="CPLoss Full",
                         choices=list(LOSS_VARIANTS),
                         help="Loss variant to use")
@@ -465,6 +465,8 @@ def main():
         batch_size  = args.batch_size,
         num_workers = args.num_workers,
     )
+    
+    # -- dm._patient_ids = dm._patient_ids[:4]
     train_loader, val_loader, test_loader = dm.get_loaders()
 
     n_channels  = 3

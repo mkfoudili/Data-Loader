@@ -210,6 +210,27 @@ class ThermalTSDBDataset(Dataset):
             f"canaux={channels} | anomaly_only={anomaly_only}"
         )
 
+        # ----------------------------------------------------------------
+        # Préchargement en RAM : évite N requêtes SQL par époque
+        # Coût unique au démarrage (~30-60s), puis lecture mémoire pure.
+        # ----------------------------------------------------------------
+        log.info(f"Préchargement de {len(self._metadata)} fenêtres en RAM...")
+        self._signal_cache: List[np.ndarray] = []
+        for i in range(len(self._metadata)):
+            row = self._metadata.iloc[i]
+            signal, _ = self._fetch_window(
+                patient_id   = int(row["patient_id"]),
+                window_start = row["window_start"],
+                window_end   = row["window_end"],
+            )
+            self._signal_cache.append(signal)
+            if (i + 1) % 1000 == 0:
+                log.info(f"  Cache : {i + 1}/{len(self._metadata)} fenêtres chargées...")
+        log.info(f"Cache prêt : {len(self._signal_cache)} fenêtres en mémoire.")
+
+        # Labels en numpy array pour accès O(1) sans iloc (beaucoup plus rapide)
+        self._labels: np.ndarray = self._metadata["label"].values.astype(np.int64)
+
     # ------------------------------------------------------------------
     # Chargement des métadonnées de fenêtres
     # ------------------------------------------------------------------
@@ -272,14 +293,11 @@ class ThermalTSDBDataset(Dataset):
 
         signal_tensor : float32 de forme (C, T) = (len(channels), window_size)
         label_tensor  : int64   scalaire (0 = normal, 1 = anomalie)
+
+        Lecture depuis le cache RAM (pas de requête SQL ici).
         """
-        row = self._metadata.iloc[idx]
-        signal, _ = self._fetch_window(
-            patient_id   = int(row["patient_id"]),
-            window_start = row["window_start"],
-            window_end   = row["window_end"],
-        )
-        label = int(row["label"])
+        signal = self._signal_cache[idx]          # lecture RAM O(1)
+        label  = int(self._labels[idx])           # numpy array O(1), pas de iloc
 
         signal_tensor = torch.from_numpy(signal)          # (C, T)
         label_tensor  = torch.tensor(label, dtype=torch.long)
@@ -651,7 +669,7 @@ def _compute_sample_weights(dataset: ThermalTSDBDataset) -> torch.Tensor:
     Les fenêtres anomalies reçoivent un poids plus élevé pour compenser
     le déséquilibre de classes (~85 % normal / ~15 % anomalie).
     """
-    labels = dataset._metadata["label"].values
+    labels = dataset._labels  # numpy array O(1), déjà en mémoire
     class_counts = np.bincount(labels)
     class_weights = 1.0 / np.where(class_counts > 0, class_counts, 1)
     sample_weights = class_weights[labels]
