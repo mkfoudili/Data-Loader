@@ -1,0 +1,4 @@
+Algorithm,F1 (%),Precision (%),Recall (%),Individual Acc. (%)
+Supervised BiLSTM,1.55,0.78,92.13,100.0
+Feature K-Means,1.01,0.51,84.27,66.67
+TS-KMeans DTW,0.62,0.31,44.94,100.0
