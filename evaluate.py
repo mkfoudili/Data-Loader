@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import csv
 import logging
+import math
 import re
 from pathlib import Path
 from typing import Iterable, Optional
@@ -447,6 +448,237 @@ def channel_fpr_for_healthy_subjects(
     return round(left_fpr, 2), round(right_fpr, 2), population
 
 
+def normalize_side(value) -> Optional[str]:
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return None
+
+    text = str(value).strip().lower()
+    if not text or text in {"nan", "none", "unknown", "healthy", "normal", "bilateral"}:
+        return None
+    if text in {"l", "left", "left_breast", "left breast", "gauche"}:
+        return "Left"
+    if text in {"r", "right", "right_breast", "right breast", "droite"}:
+        return "Right"
+    return None
+
+
+def find_side_column(columns: Iterable[str]) -> Optional[str]:
+    candidates = [
+        "tumor_location",
+        "tumour_location",
+        "tumor_side",
+        "tumour_side",
+        "lesion_side",
+        "affected_side",
+        "pathology_side",
+        "cancer_side",
+        "breast_side",
+        "laterality",
+        "side",
+        "location",
+    ]
+    lower_to_original = {column.lower(): column for column in columns}
+    for candidate in candidates:
+        if candidate in lower_to_original:
+            return lower_to_original[candidate]
+    return None
+
+
+def load_localization_truth(
+    datasets: Iterable[ThermalNPYDatasetWithMetadata],
+    truth_csv: Optional[Path] = None,
+) -> dict[int, str]:
+    truth: dict[int, str] = {}
+
+    if truth_csv is not None:
+        if not truth_csv.exists():
+            raise FileNotFoundError(f"Localization truth CSV not found: {truth_csv}")
+        truth_df = pd.read_csv(truth_csv)
+        if "patient_id" not in truth_df.columns:
+            raise ValueError(f"{truth_csv} must contain a patient_id column")
+        side_col = find_side_column(truth_df.columns)
+        if side_col is None:
+            raise ValueError(
+                f"{truth_csv} must contain a tumor side column "
+                "(for example tumor_side, tumor_location, laterality, or side)"
+            )
+        for _, row in truth_df.iterrows():
+            side = normalize_side(row[side_col])
+            if side is not None:
+                truth[int(row["patient_id"])] = side
+
+    for dataset in datasets:
+        side_col = find_side_column(dataset.metadata.columns)
+        if side_col is None:
+            continue
+        for pid, group in dataset.metadata.groupby("patient_id"):
+            sides = [
+                side
+                for side in group[side_col].map(normalize_side).dropna().unique().tolist()
+                if side is not None
+            ]
+            if len(sides) == 1:
+                truth[int(pid)] = sides[0]
+
+    return truth
+
+
+def binomial_wilson_ci(successes: int, total: int, z: float = 1.959963984540054) -> tuple[float, float]:
+    if total <= 0:
+        return np.nan, np.nan
+
+    p_hat = successes / total
+    denom = 1.0 + z * z / total
+    center = (p_hat + z * z / (2.0 * total)) / denom
+    half_width = (
+        z
+        * math.sqrt((p_hat * (1.0 - p_hat) / total) + (z * z / (4.0 * total * total)))
+        / denom
+    )
+    return max(0.0, center - half_width), min(1.0, center + half_width)
+
+
+def localization_rows(
+    scores: dict,
+    labels: np.ndarray,
+    true_locations: dict[int, str],
+    channels: list[str],
+) -> tuple[list[dict], dict]:
+    left_idx = channel_index(channels, "left")
+    right_idx = channel_index(channels, "right")
+    if left_idx is None or right_idx is None:
+        raise RuntimeError("Localization requires left and right channels in the dataset")
+
+    rows = []
+    for pid in np.unique(scores["patient_ids"]):
+        pid_int = int(pid)
+        mask = scores["patient_ids"] == pid
+        if labels[mask].sum() == 0:
+            continue
+
+        true_location = true_locations.get(pid_int)
+        if true_location is None:
+            continue
+
+        left_score = float(scores["channel_losses"][mask, left_idx].mean())
+        right_score = float(scores["channel_losses"][mask, right_idx].mean())
+        predicted_location = "Left" if left_score > right_score else "Right"
+        correct = int(predicted_location == true_location)
+        rows.append(
+            {
+                "patient_id": pid_int,
+                "true_location": true_location,
+                "predicted_location": predicted_location,
+                "left_mean_anomaly_score": left_score,
+                "right_mean_anomaly_score": right_score,
+                "correct": correct,
+            }
+        )
+
+    total = len(rows)
+    correct = int(sum(row["correct"] for row in rows))
+    ci_low, ci_high = binomial_wilson_ci(correct, total)
+    summary = {
+        "Model": "TAAE",
+        "Subjects": total,
+        "Correct": correct,
+        "Localization Accuracy (%)": round(100.0 * correct / total, 2) if total else np.nan,
+        "95% CI Lower (%)": round(100.0 * ci_low, 2) if total else np.nan,
+        "95% CI Upper (%)": round(100.0 * ci_high, 2) if total else np.nan,
+        "Method": "higher mean left/right reconstruction anomaly score",
+    }
+    return rows, summary
+
+
+def append_csv_row(row: dict, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not path.exists() or path.stat().st_size == 0
+    with path.open("a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
+    log.info("Appended %s", path)
+
+
+@torch.no_grad()
+def save_attention_heatmap(
+    model: TAAE,
+    dataset: ThermalNPYDatasetWithMetadata,
+    scores: dict,
+    output_path: Path,
+    device: torch.device,
+    score_metric: str,
+) -> Optional[dict]:
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        log.warning("matplotlib is not installed; skipping Figure 4")
+        return None
+
+    labels = scores["labels"]
+    candidate_idx = np.where(labels == 1)[0]
+    if len(candidate_idx) == 0:
+        candidate_idx = np.arange(len(labels))
+    if len(candidate_idx) == 0:
+        log.warning("No test windows available; skipping Figure 4")
+        return None
+
+    selected_idx = int(candidate_idx[np.argmax(scores["losses"][candidate_idx])])
+    signal, label = dataset[selected_idx]
+    x = signal.unsqueeze(0).to(device)
+
+    # Same TAAE attention extraction path used by extract_attention_a3.py.
+    x_hat, alpha = model(x)
+
+    if score_metric == "mae":
+        timestep_error = (x - x_hat).abs().mean(dim=1).squeeze(0).cpu().numpy()
+    else:
+        timestep_error = ((x - x_hat) ** 2).mean(dim=1).squeeze(0).cpu().numpy()
+
+    attention = alpha.squeeze(0).detach().cpu().numpy()
+    timesteps = np.arange(WINDOW_SIZE)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(11, 4.8))
+    im = ax.imshow(
+        attention.reshape(1, -1),
+        aspect="auto",
+        cmap="viridis",
+        extent=(-0.5, WINDOW_SIZE - 0.5, 0.0, 1.0),
+    )
+    ax.set_yticks([])
+    ax.set_xlabel("Timestep (seconds)")
+    ax.set_ylabel("Attention")
+    ax.set_title(
+        f"Figure 4 - Attention and reconstruction error "
+        f"(patient {int(dataset.patient_ids_per_window[selected_idx])}, "
+        f"window {int(dataset.window_ids[selected_idx])})"
+    )
+
+    ax_err = ax.twinx()
+    ax_err.plot(timesteps, timestep_error, color="white", linewidth=2.4, label="Reconstruction error")
+    ax_err.plot(timesteps, timestep_error, color="#d62728", linewidth=1.3)
+    ax_err.set_ylabel(f"Reconstruction error ({score_metric.upper()})")
+    ax_err.legend(loc="upper right", frameon=True)
+
+    cbar = fig.colorbar(im, ax=ax, pad=0.02)
+    cbar.set_label("Attention weight")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=160, bbox_inches="tight")
+    plt.close(fig)
+    log.info("Saved %s", output_path)
+
+    return {
+        "patient_id": int(dataset.patient_ids_per_window[selected_idx]),
+        "window_id": int(dataset.window_ids[selected_idx]),
+        "label": int(label.item()),
+    }
+
+
 def save_csv(rows: list[dict], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as f:
@@ -469,6 +701,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-ratio", type=float, default=0.70)
     parser.add_argument("--val-ratio", type=float, default=0.15)
     parser.add_argument("--patients", nargs="*", type=int, default=None)
+    parser.add_argument(
+        "--localization-truth-csv",
+        default=None,
+        help=(
+            "Optional CSV with patient_id plus tumor_side/tumor_location/"
+            "laterality/side for localization ground truth"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -581,6 +821,35 @@ def main() -> None:
     )
     save_csv(table_ii_rows, out_dir / "table_II_reconstruction.csv")
 
+    truth_csv = Path(args.localization_truth_csv) if args.localization_truth_csv else None
+    true_locations = load_localization_truth(
+        [train_ds, val_ds, test_ds],
+        truth_csv=truth_csv,
+    )
+    localization_detail, localization_summary = localization_rows(
+        test_scores,
+        test_scores["labels"],
+        true_locations,
+        channels,
+    )
+    append_csv_row(localization_summary, out_dir / "table_III_localization.csv")
+    if localization_detail:
+        save_csv(localization_detail, out_dir / "table_III_localization_subjects.csv")
+    else:
+        log.warning(
+            "No localization subjects with known tumor side were found. "
+            "Provide --localization-truth-csv if side labels are not in the window metadata."
+        )
+
+    figure4_meta = save_attention_heatmap(
+        model,
+        test_ds,
+        test_scores,
+        out_dir / "figure4.png",
+        device,
+        args.score_metric,
+    )
+
     print("\nTable I - TAAE anomaly detection")
     for key in [
         "F1 (%)",
@@ -597,6 +866,19 @@ def main() -> None:
         print(
             f"  {row['Split']}: MAE={row['MAE']}, RMSE={row['RMSE']}, "
             f"r={row['Pearson Correlation']}, cosine={row['Cosine Similarity']}"
+        )
+
+    print("\nTable III - localization")
+    print(
+        f"  Accuracy: {localization_summary['Localization Accuracy (%)']}% "
+        f"(95% CI {localization_summary['95% CI Lower (%)']}%-"
+        f"{localization_summary['95% CI Upper (%)']}%, "
+        f"n={localization_summary['Subjects']})"
+    )
+    if figure4_meta is not None:
+        print(
+            f"\nFigure 4 saved for patient {figure4_meta['patient_id']}, "
+            f"window {figure4_meta['window_id']}"
         )
 
 

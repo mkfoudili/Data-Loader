@@ -1,0 +1,2 @@
+Model,Subjects,Correct,Localization Accuracy (%),95% CI Lower (%),95% CI Upper (%),Method
+TAAE,0,0,nan,nan,nan,higher mean left/right reconstruction anomaly score
