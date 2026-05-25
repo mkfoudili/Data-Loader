@@ -26,7 +26,12 @@ loss.py                   ← grades how wrong the model was
 sprint3_output/
     ├── best_model.pt     ← saved best model (use this for evaluation)
     ├── figure1.png       ← training curves
-    └── table_IV_ablation.csv
+    ├── table_IV_ablation.csv
+    ↓
+evaluate.py               ← runs evaluation on test set
+    ↓
+    ├── table_I_metrics.csv           ← anomaly detection metrics
+    └── table_II_reconstruction.csv   ← reconstruction quality metrics
 ```
 
 ---
@@ -40,6 +45,7 @@ sprint3_output/
 | `model.py` | The TAAE model — encoder, attention, decoder. Import this to load the model. |
 | `loss.py` | 4 loss variants: MSE only, MSE+Pattern, MSE+Trend, CPLoss Full. Used during training. |
 | `train.py` | Runs training, saves best checkpoint, generates Figure 1 and Table IV. |
+| `evaluate.py` | Evaluates the trained model on test set. Computes anomaly detection metrics and reconstruction quality. Outputs Table I and Table II. |
 
 ### ✅ Built in Previous Tasks (A1 / A2 / A3)
 
@@ -66,9 +72,31 @@ python train.py
 # Run all 4 ablation variants → Table IV
 python train.py --ablation
 
+# Evaluate the trained model → Table I (anomaly metrics) & Table II (reconstruction quality)
+python evaluate.py --npy-dir ../Data-Wrangling/etl_output/npy
+
 # Store attention maps in DB (after training)
 python extract_attention_a3.py
 ```
+
+---
+
+## Evaluation Outputs
+
+**Table I — Anomaly Detection Metrics** (`table_I_metrics.csv`)
+- F1, Precision, Recall scores for anomaly detection
+- Individual patient accuracy
+- Window/subject anomaly thresholds
+- Per-channel false positive rates on healthy subjects
+- Confusion matrix (TP, FP, FN, TN)
+
+**Table II — Reconstruction Quality** (`table_II_reconstruction.csv`)
+- MAE, RMSE, Pearson correlation, Cosine similarity
+- Computed separately for:
+  - Training set (all windows)
+  - Validation set (all windows)
+  - Test healthy windows only
+  - Test anomalous windows only
 
 ---
 
